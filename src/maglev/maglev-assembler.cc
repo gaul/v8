@@ -783,6 +783,18 @@ void MaglevAssembler::ResetLastYoungAllocation() {
 
 namespace {
 
+// Masks applied to a sign-extended osr_state. Clearing the middle bits keeps
+// the urgency (and, for the quick check, the Turbofan cached-code bit) while
+// preserving OsrTieringInProgressBit in the sign position.
+static_assert(FeedbackVector::OsrTieringInProgressBit::kShift == 7);
+constexpr int kOsrUrgencyOrInProgressMask = static_cast<int>(
+    ~(FeedbackVector::MaybeHasTurbofanOsrCodeBit::kMask |
+      FeedbackVector::MaybeHasMaglevOsrCodeBit::kMask |
+      FeedbackVector::DontUseTheseBitsUnlessBeneficialBits::kMask));
+constexpr int kOsrQuickCheckMask = static_cast<int>(
+    ~(FeedbackVector::MaybeHasMaglevOsrCodeBit::kMask |
+      FeedbackVector::DontUseTheseBitsUnlessBeneficialBits::kMask));
+
 void AttemptOnStackReplacement(MaglevAssembler* masm,
                                ZoneLabelRef no_code_for_osr,
                                ReduceInterruptBudgetForLoop* node,
@@ -805,17 +817,15 @@ void AttemptOnStackReplacement(MaglevAssembler* masm,
 
   // Case 2).
   {
-    __ LoadByte(scratch1, FieldMemOperand(
-                              scratch0, offsetof(FeedbackVector, osr_state_)));
-    __ DecodeField<FeedbackVector::OsrUrgencyBits>(scratch1);
-    __ JumpIfByte(kUnsignedLessThanEqual, scratch1, node->loop_depth(),
-                  *no_code_for_osr);
-
-    // If tiering is already in progress wait.
-    static_assert(FeedbackVector::OsrTieringInProgressBit::kMask <= 0xff);
-    __ TestUint8AndJumpIfAnySet(
-        FieldMemOperand(scratch0, offsetof(FeedbackVector, flags_)),
-        FeedbackVector::OsrTieringInProgressBit::kMask, *no_code_for_osr);
+    // Keep the urgency and the sign bit (OsrTieringInProgressBit). If tiering
+    // is already in progress the value is negative, so one signed comparison
+    // covers both "urgency too low" and "wait for the in-flight compile".
+    __ LoadSignedField(
+        scratch1,
+        FieldMemOperand(scratch0, offsetof(FeedbackVector, osr_state_)), 1);
+    __ AndInt32(scratch1, kOsrUrgencyOrInProgressMask);
+    __ CompareInt32AndJumpIf(scratch1, node->loop_depth(), kLessThanEqual,
+                             *no_code_for_osr);
 
     {
       // The osr_urgency exceeds the current loop_depth, signaling an OSR
@@ -865,8 +875,11 @@ void MaglevAssembler::TryOnStackReplacement(ReduceInterruptBudgetForLoop* node,
   Move(scratch0,
        compilation_info()->toplevel_compilation_unit()->feedback().object());
   AssertFeedbackVector(scratch0, scratch1);
-  LoadByte(osr_state,
-           FieldMemOperand(scratch0, offsetof(FeedbackVector, osr_state_)));
+  // Sign-extending load: while an OSR compile is in flight the sign bit is
+  // set and the signed comparison below falls through without masking.
+  LoadSignedField(
+      osr_state, FieldMemOperand(scratch0, offsetof(FeedbackVector, osr_state_)),
+      1);
 
   ZoneLabelRef no_code_for_osr(this);
 
@@ -874,10 +887,7 @@ void MaglevAssembler::TryOnStackReplacement(ReduceInterruptBudgetForLoop* node,
     // In case we use maglev_osr, we need to explicitly know if there is
     // turbofan code waiting for us (i.e., ignore the
     // MaybeHasMaglevOsrCodeBit).
-    DecodeField<
-        base::BitFieldUnion<FeedbackVector::OsrUrgencyBits,
-                            FeedbackVector::MaybeHasTurbofanOsrCodeBit>>(
-        osr_state);
+    AndInt32(osr_state, kOsrQuickCheckMask);
   }
 
   // The quick initial OSR check. If it passes, we proceed on to more
@@ -885,7 +895,7 @@ void MaglevAssembler::TryOnStackReplacement(ReduceInterruptBudgetForLoop* node,
   static_assert(FeedbackVector::MaybeHasTurbofanOsrCodeBit::encode(true) >
                 FeedbackVector::kMaxOsrUrgency);
   CompareInt32AndJumpIf(
-      osr_state, node->loop_depth(), kUnsignedGreaterThan,
+      osr_state, node->loop_depth(), kGreaterThan,
       MakeDeferredCode(AttemptOnStackReplacement, no_code_for_osr, node,
                        scratch0, scratch1, feedback_slot));
   bind(*no_code_for_osr);

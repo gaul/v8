@@ -2485,7 +2485,8 @@ IGNITION_HANDLER(JumpLoop, InterpreterAssembler) {
   static_assert(FeedbackVector::MaybeHasTurbofanOsrCodeBit::encode(true) >
                 FeedbackVector::kMaxOsrUrgency);
 
-  GotoIfNot(Uint32GreaterThanOrEqual(loop_depth, osr_state),
+  // Signed: a set OsrTieringInProgressBit makes osr_state negative.
+  GotoIfNot(Int32GreaterThanOrEqual(loop_depth, osr_state),
             &maybe_osr_because_osr_state);
 
   // Perhaps we've got cached baseline code?

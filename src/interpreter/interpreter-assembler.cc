@@ -1487,11 +1487,10 @@ void InterpreterAssembler::UpdateInterruptBudgetOnReturn() {
 
 TNode<Int8T> InterpreterAssembler::LoadOsrState(
     TNode<FeedbackVector> feedback_vector) {
-  // We're loading an 8-bit field, mask it.
-  return UncheckedCast<Int8T>(
-      Word32And(LoadObjectField<Int8T>(feedback_vector,
-                                       offsetof(FeedbackVector, osr_state_)),
-                0xFF));
+  // Sign-extending load: OsrTieringInProgressBit is the sign bit, so a
+  // signed comparison against the loop depth treats it as "not armed".
+  return LoadObjectField<Int8T>(feedback_vector,
+                                offsetof(FeedbackVector, osr_state_));
 }
 
 void InterpreterAssembler::Abort(AbortReason abort_reason) {
@@ -1561,10 +1560,9 @@ void InterpreterAssembler::OnStackReplacement(
 
     BIND(&maybe_osr_to_opt);
     {
-      TNode<Uint16T> flags = LoadObjectField<Uint16T>(
-          feedback_vector, offsetof(FeedbackVector, flags_));
       TNode<Word32T> in_progress = Word32And(
-          flags, Int32Constant(FeedbackVector::OsrTieringInProgressBit::kMask));
+          osr_state,
+          Int32Constant(FeedbackVector::OsrTieringInProgressBit::kMask));
       GotoIf(Word32Equal(in_progress, 0), &osr_to_opt);
       Goto(&baseline);
     }

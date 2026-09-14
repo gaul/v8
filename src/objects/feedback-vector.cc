@@ -397,7 +397,6 @@ void FeedbackVector::set_tiering_in_progress(bool in_progress) {
 void FeedbackVector::reset_flags() {
   set_flags(
       TieringInProgressBit::encode(false) |
-      OsrTieringInProgressBit::encode(false) |
       MaybeHasMaglevOsrCodeBit::encode(false) |
       MaybeHasTurbofanOsrCodeBit::encode(false));
 }
@@ -421,11 +420,11 @@ void FeedbackVector::SetOptimizedOsrCode(Isolate* isolate, FeedbackSlot slot,
 }
 
 bool FeedbackVector::osr_tiering_in_progress() {
-  return OsrTieringInProgressBit::decode(flags());
+  return OsrTieringInProgressBit::decode(osr_state());
 }
 
 void FeedbackVector::set_osr_tiering_in_progress(bool osr_in_progress) {
-  set_flags(OsrTieringInProgressBit::update(flags(), osr_in_progress));
+  set_osr_state(OsrTieringInProgressBit::update(osr_state(), osr_in_progress));
 }
 
 bool FeedbackVector::ClearSlots(Isolate* isolate, ClearBehavior behavior) {

@@ -307,14 +307,17 @@ V8_OBJECT class FeedbackVector : public HeapObject {
   using MaybeHasTurbofanOsrCodeBit = OsrUrgencyBits::Next<bool, 1>;
   using MaybeHasMaglevOsrCodeBit = MaybeHasTurbofanOsrCodeBit::Next<bool, 1>;
   using DontUseTheseBitsUnlessBeneficialBits =
-      MaybeHasMaglevOsrCodeBit::Next<uint32_t, 3>;
+      MaybeHasMaglevOsrCodeBit::Next<uint32_t, 2>;
+  // The sign bit of |osr_state|: a signed comparison against the loop depth
+  // then reads "tiering in progress" as "not armed" for free.
+  using OsrTieringInProgressBit =
+      DontUseTheseBitsUnlessBeneficialBits::Next<bool, 1>;
+  static_assert(OsrTieringInProgressBit::kShift == 7);
   // Bit positions in |flags|.
   using TieringInProgressBit = base::BitField<bool, 0, 1, uint16_t>;
-  using OsrTieringInProgressBit = TieringInProgressBit::Next<bool, 1>;
-  using InterruptBudgetResetByIcChangeBit =
-      OsrTieringInProgressBit::Next<bool, 1>;
+  using InterruptBudgetResetByIcChangeBit = TieringInProgressBit::Next<bool, 1>;
   using AllYourBitsAreBelongToJgruberBits =
-      InterruptBudgetResetByIcChangeBit::Next<uint32_t, 13>;
+      InterruptBudgetResetByIcChangeBit::Next<uint32_t, 14>;
 
   inline bool is_empty() const;
 

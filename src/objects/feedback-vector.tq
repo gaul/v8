@@ -7,9 +7,8 @@ type TieringState extends uint16 constexpr 'TieringState';
 @cppScope('FeedbackVector')
 bitfield struct FeedbackVectorFlags extends uint16 {
   tiering_in_progress: bool: 1 bit;
-  osr_tiering_in_progress: bool: 1 bit;
   interrupt_budget_reset_by_ic_change: bool: 1 bit;
-  all_your_bits_are_belong_to_jgruber: uint32: 13 bit;
+  all_your_bits_are_belong_to_jgruber: uint32: 14 bit;
 }
 
 @cppScope('FeedbackVector')
@@ -23,7 +22,11 @@ bitfield struct OsrState extends uint8 {
   // In order to have fast OSR checks in Ignition and Sparkplug, these bits
   // should remain 0. That way, the OSR check can be implemented as a single
   // comparison.
-  dont_use_these_bits_unless_beneficial: uint32: 3 bit;
+  dont_use_these_bits_unless_beneficial: uint32: 2 bit;
+  // Set while an OSR compilation for this function is in flight. Placed in
+  // the sign bit so that a signed comparison of osr_state against the loop
+  // depth treats "tiering in progress" as "OSR not armed" without masking.
+  osr_tiering_in_progress: bool: 1 bit;
 }
 
 @cppObjectLayoutDefinition
