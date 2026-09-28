@@ -3875,7 +3875,7 @@ void VisitCompareZero(InstructionSelector* selector, OpIndex user, OpIndex node,
                       InstructionCode opcode, FlagsContinuation* cont) {
   X64OperandGenerator g(selector);
   const Operation& op = selector->turboshaft_graph()->Get(node);
-  if (cont->IsBranch() &&
+  if ((cont->IsBranch() || cont->IsDeoptimize()) &&
       (cont->condition() == kNotEqual || cont->condition() == kEqual)) {
     if (const WordBinopOp* binop = op.TryCast<WordBinopOp>()) {
       if (selector->IsOnlyUserOfNodeInSameBlock(user, node)) {
