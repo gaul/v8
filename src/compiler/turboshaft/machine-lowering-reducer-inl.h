@@ -3537,6 +3537,43 @@ class MachineLoweringReducer : public Next {
     return V<None>::Invalid();
   }
 
+  // A CompareMaps that is only used by the Branch ending its block is lowered
+  // together with that Branch by ReduceInputGraphBranch, which compares and
+  // branches per map instead of branching on the disjunction of all
+  // comparisons.
+  V<Word32> REDUCE_INPUT_GRAPH(CompareMaps)(V<Word32> ig_index,
+                                            const CompareMapsOp& compare_maps) {
+    if (IsOnlyUsedByBranchEndingBlock(ig_index, compare_maps)) {
+      return V<Word32>::Invalid();
+    }
+    return Next::ReduceInputGraphCompareMaps(ig_index, compare_maps);
+  }
+
+  V<None> REDUCE_INPUT_GRAPH(Branch)(V<None> ig_index, const BranchOp& branch) {
+    LABEL_BLOCK(no_change) {
+      return Next::ReduceInputGraphBranch(ig_index, branch);
+    }
+    const Operation& condition = __ input_graph().Get(branch.condition());
+    const CompareMapsOp* compare_maps = condition.TryCast<CompareMapsOp>();
+    if (compare_maps == nullptr ||
+        !IsOnlyUsedByBranchEndingBlock(branch.condition(), *compare_maps)) {
+      goto no_change;
+    }
+    V<Map> heap_object_map;
+    if (compare_maps->map().has_value()) {
+      heap_object_map = __ MapToNewGraph(compare_maps->map().value());
+    } else {
+      heap_object_map =
+          __ LoadMapField(__ MapToNewGraph(compare_maps->heap_object()));
+    }
+    Label<> match(this);
+    GotoIfMapMatches(heap_object_map, compare_maps->maps, match, branch.hint);
+    __ Goto(__ MapToNewGraph(branch.if_false));
+    BIND(match);
+    __ Goto(__ MapToNewGraph(branch.if_true));
+    return V<None>::Invalid();
+  }
+
   V<Word32> REDUCE(CompareMaps)(V<HeapObject> heap_object, OptionalV<Map> map,
                                 const ZoneRefSet<Map>& maps) {
     if (!map.has_value()) {
@@ -3562,24 +3599,25 @@ class MachineLoweringReducer : public Next {
     }
 
     if (flags & CheckMapsFlag::kTryMigrateInstance) {
-      IF_NOT (LIKELY(CompareMapAgainstMultipleMaps(heap_object_map, maps))) {
-        // Reloading the map slightly reduces register pressure, and we are on a
-        // slow path here anyway.
-        MigrateInstanceOrDeopt(heap_object, heap_object_map, frame_state,
-                               feedback);
-        heap_object_map = __ LoadMapField(heap_object);
-        __ DeoptimizeIfNot(__ CompareMaps(heap_object, heap_object_map, maps),
-                           frame_state, DeoptimizeReason::kWrongMap, feedback);
-      }
+      Label<> done(this);
+      GotoIfMapMatches(heap_object_map, maps, done, BranchHint::kTrue);
+      MigrateInstanceOrDeopt(heap_object, heap_object_map, frame_state,
+                             feedback);
+      // Reloading the map slightly reduces register pressure, and we are on a
+      // slow path here anyway.
+      heap_object_map = __ LoadMapField(heap_object);
+      DeoptimizeIfMapDoesNotMatch(heap_object_map, maps, frame_state, feedback);
+      GOTO(done);
+      BIND(done);
     } else if (flags & CheckMapsFlag::kTryMigrateInstanceAndDeopt) {
-      IF_NOT (LIKELY(CompareMapAgainstMultipleMaps(heap_object_map, maps))) {
-        TryMigrateInstanceAndMarkMapAsMigrationTarget(
-            heap_object, heap_object_map, frame_state, feedback);
-        __ Deoptimize(frame_state, DeoptimizeReason::kWrongMap, feedback);
-      }
+      Label<> done(this);
+      GotoIfMapMatches(heap_object_map, maps, done, BranchHint::kTrue);
+      TryMigrateInstanceAndMarkMapAsMigrationTarget(
+          heap_object, heap_object_map, frame_state, feedback);
+      __ Deoptimize(frame_state, DeoptimizeReason::kWrongMap, feedback);
+      BIND(done);
     } else {
-      __ DeoptimizeIfNot(__ CompareMaps(heap_object, heap_object_map, maps),
-                         frame_state, DeoptimizeReason::kWrongMap, feedback);
+      DeoptimizeIfMapDoesNotMatch(heap_object_map, maps, frame_state, feedback);
     }
     // Inserting a AssumeMap so that subsequent optimizations know the map of
     // this object.
@@ -4833,6 +4871,72 @@ class MachineLoweringReducer : public Next {
       }
     }
     return result;
+  }
+
+  // Emits one comparison and branch per map in {maps}, jumping to {match} as
+  // soon as {heap_object_map} is one of them, and falls through otherwise.
+  // Compared to branching once on the disjunction of all comparisons, this
+  // lets the instruction selector fuse every comparison into its branch
+  // instead of materializing the result of each one. {hint} says whether a
+  // match is likely. A likely match only makes the last comparison likely to
+  // succeed, since it is only reached once all the others have failed, while
+  // an unlikely match makes every comparison unlikely to succeed.
+  template <typename L>
+  void GotoIfMapMatches(V<Map> heap_object_map, const ZoneRefSet<Map>& maps,
+                        L& match, BranchHint hint) {
+    for (size_t i = 0; i < maps.size(); ++i) {
+      V<Word32> is_map =
+          __ TaggedEqual(heap_object_map, __ HeapConstant(maps[i].object()));
+      BranchHint comparison_hint = hint;
+      if (hint == BranchHint::kTrue && i + 1 < maps.size()) {
+        comparison_hint = BranchHint::kNone;
+      }
+      GOTO_IF(ConditionWithHint(is_map, comparison_hint), match);
+    }
+  }
+
+  // Deoptimizes with reason kWrongMap unless {heap_object_map} is one of
+  // {maps}, comparing and branching per map like GotoIfMapMatches does.
+  void DeoptimizeIfMapDoesNotMatch(V<Map> heap_object_map,
+                                   const ZoneRefSet<Map>& maps,
+                                   V<EagerFrameState> frame_state,
+                                   const FeedbackSource& feedback) {
+    DCHECK(!maps.is_empty());
+    size_t last = maps.size() - 1;
+    if (last == 0) {
+      __ DeoptimizeIfNot(
+          __ TaggedEqual(heap_object_map, __ HeapConstant(maps[0].object())),
+          frame_state, DeoptimizeReason::kWrongMap, feedback);
+      return;
+    }
+    Label<> done(this);
+    for (size_t i = 0; i < last; ++i) {
+      GOTO_IF(
+          __ TaggedEqual(heap_object_map, __ HeapConstant(maps[i].object())),
+          done);
+    }
+    __ DeoptimizeIfNot(
+        __ TaggedEqual(heap_object_map, __ HeapConstant(maps[last].object())),
+        frame_state, DeoptimizeReason::kWrongMap, feedback);
+    GOTO(done);
+    BIND(done);
+  }
+
+  // Whether the CompareMaps at {index} in the current input block has no use
+  // besides the Branch that ends this block. Both ReduceInputGraphCompareMaps
+  // and ReduceInputGraphBranch rely on this to agree on lowering such a pair
+  // to a chain of comparisons and branches.
+  bool IsOnlyUsedByBranchEndingBlock(V<Word32> index,
+                                     const CompareMapsOp& compare_maps) {
+    if (!compare_maps.saturated_use_count.Is(1) ||
+        compare_maps.maps.is_empty()) {
+      return false;
+    }
+    const Block* block = __ current_input_block();
+    if (!block->Contains(index)) return false;
+    const Operation& last = block->LastOperation(__ input_graph());
+    const BranchOp* branch = last.TryCast<BranchOp>();
+    return branch != nullptr && branch->condition() == index;
   }
 
   bool DependOnNoUndetectableObjectsProtector() {
